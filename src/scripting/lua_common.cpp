@@ -590,12 +590,18 @@ bool luaW_totstring(lua_State *L, int index, t_string &str)
 t_string luaW_checktstring(lua_State *L, int index)
 {
 	t_string result;
-	if (!luaW_totstring(L, index, result))
-		luaW_type_error(L, index, "translatable string");
-	return result;
+	if(luaW_totstring(L, index, result)) {
+		return result;
+	}
+	size_t sz;
+	if(const char* cstr = lua_tolstring(L, index, &sz)) {
+		return std::string(cstr, sz);
+	}
+	luaW_type_error(L, index, "translatable string");
+	return result; // To avoid warnings about function not returning a value
 }
 
-bool luaW_isstring(lua_State* L, int index)
+bool luaW_iststring(lua_State* L, int index)
 {
 	if(lua_isstring(L, index)) {
 		return true;
