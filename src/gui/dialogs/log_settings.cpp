@@ -78,7 +78,7 @@ void log_settings::pre_show(window& window)
 			}
 		}
 		int current_sev;
-		if (lg::get_log_domain_severity(this_domain, current_sev)){
+		if (lg::get_log_domain_severity(this_domain, current_sev) && current_sev >= 0 && current_sev < widget_id_.size()){
 			group.set_member_states(widget_id_[current_sev]);
 		}
 	}
