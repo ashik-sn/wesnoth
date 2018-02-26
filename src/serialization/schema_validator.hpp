@@ -20,8 +20,6 @@
 #include "config_cache.hpp"
 #include "serialization/parser.hpp"
 
-#include <boost/regex.hpp>
-
 #include <iostream>
 #include <queue>
 #include <string>
@@ -81,7 +79,7 @@ private:
 	typedef std::stack<cnt_map> cnt_stack;
 
 	enum message_type{WRONG_TAG,EXTRA_TAG,MISSING_TAG,
-					EXTRA_KEY,MISSING_KEY,WRONG_VALUE};
+					EXTRA_KEY,MISSING_KEY,WRONG_VALUE,WRONG_TYPE};
 	//error_cache
 	/**
 	  * Messages are cached.
@@ -143,6 +141,6 @@ private:
 	/**
 	 * Type validators.
 	 */
-	 std::map<std::string,boost::regex> types_;
+	 std::map<std::string,class_type> types_;
 };
 }//namespace schema_validation{

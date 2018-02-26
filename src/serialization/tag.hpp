@@ -25,17 +25,40 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <vector>
+
+#include <boost/regex.hpp>
 
 class config;
 
 namespace schema_validation{
+class class_type {
+	std::string name_;
+	std::vector<boost::regex> patterns_;
+	std::vector<std::string> links_;
+	boost::regex split_;
+	bool is_list_ = false;
+	int list_min_ = 0, list_max_ = -1;
+	mutable bool in_list_match_ = false;
+public:
+	class_type() : name_("") {}
+	class_type(const std::string& name, const std::string& pattern) : name_(name), patterns_(1, boost::regex(pattern))
+	{}
+	class_type(const config&);
+
+	bool matches(const std::string& value, const std::map<std::string, class_type>& type_map) const;
+
+	enum CLASS {UNION, INTERSECTION};
+private:
+	CLASS join = UNION;
+};
 /**
   * class_key is used to save the information about one key.
   * Key has next info: name, type, default value or key is mandatory.
   */
 class class_key{
 public:
-	class_key():name_(""),type_(""),default_("\"\""),mandatory_(false)
+	class_key() :name_(""), type_(""), default_("\"\""), mandatory_(false), fuzzy_(false)
 	{ }
 	class_key(const std::string & name,
 			  const std::string &type,
@@ -44,6 +67,7 @@ public:
 		, type_(type)
 		, default_(def)
 		, mandatory_(def.empty())
+		, fuzzy_(name.find_first_of("*?") != std::string::npos)
 	{
 	}
 	class_key(const config&);
@@ -60,6 +84,9 @@ public:
 	bool  is_mandatory () const{
 		return mandatory_ ;
 	}
+	bool is_fuzzy() const {
+		return fuzzy_;
+	}
 
 	void  set_name(const std::string& name){
 		name_ = name;
@@ -75,6 +102,9 @@ public:
 	}
 	void  set_mandatory(bool mandatory){
 		mandatory_ = mandatory;
+	}
+	void set_fuzzy(bool f) {
+		fuzzy_ = f;
 	}
 	/** is used to print key info
 	 * the format is next
@@ -102,6 +132,8 @@ private:
 	std::string default_;
 	/** Shows, if key is a mandatory key.*/
 	bool mandatory_;
+	/** Whether the key is a fuzzy match. */
+	bool fuzzy_;
 };
 
 /**
@@ -152,13 +184,16 @@ public:
 		, tags_()
 		, keys_()
 		, links_()
+		, fuzzy_(false)
+		, any_tag_(false)
 	{
 	}
 
 	class_tag(const std::string & name,
 			  int min,
 			  int max,
-			  const std::string & super=""
+			  const std::string & super="",
+			  bool any = false
 			  )
 		: name_(name)
 		, min_(min)
@@ -167,6 +202,8 @@ public:
 		, tags_()
 		, keys_()
 		, links_()
+		, fuzzy_(name.find_first_of("*?") != std::string::npos)
+		, any_tag_(any)
 	{
 	}
 	class_tag(const config&);
@@ -200,6 +237,12 @@ public:
 	bool is_extension() const{
 		return ! super_.empty();
 	}
+	bool is_fuzzy() const {
+		return fuzzy_;
+	}
+	bool accepts_any_tag() const {
+		return any_tag_;
+	}
 
 	void set_name(const std::string& name){
 		name_ = name;
@@ -224,6 +267,12 @@ public:
 	}
 	void set_super(const std::string& s){
 		super_= s;
+	}
+	void set_fuzzy(bool f) {
+		fuzzy_ = f;
+	}
+	void set_any_tag(bool any) {
+		any_tag_ = any;
 	}
 	void add_key(const class_key& new_key){
 		keys_.emplace(new_key.get_name(), new_key);
@@ -287,18 +336,6 @@ public:
 	/** Removes all keys with this type. Works recursively */
 	void remove_keys_by_type(const std::string &type);
 
-#ifdef _MSC_VER
-	// MSVC throws an error if this method is private.
-	// so, define it as public to prevent that. The error is:
-	// error C2248: 'schema_validation::class_tag::find_tag' : cannot
-	// access private member declared in class 'schema_validation::class_tag'
-
-	class_tag * find_tag(const std::string & fullpath,
-								class_tag & root) ;
-#endif
-
-//	class_tag & operator= (const class_tag&);
-
 private:
 	/** name of tag*/
 	std::string name_;
@@ -320,6 +357,10 @@ private:
 	key_map keys_;
 	/** links to possible children. */
 	link_map links_;
+	/** whether this is a "fuzzy" tag. */
+	bool fuzzy_;
+	/** whether this tag allows arbitrary subtags. */
+	bool any_tag_;
 	/**
 	 * the same as class_tag::print(std::ostream&)
 	 * but indents different levels with step space.
@@ -329,11 +370,9 @@ private:
 	 */
 	void printl(std::ostream &os,int level, int step = 4);
 
-#ifndef _MSC_VER
-	// this is complementary with the above #ifdef for the MSVC error
-	class_tag * find_tag(const std::string & fullpath,
-								class_tag & root) ;
-#endif
+	class_tag * find_tag(const std::string & fullpath, class_tag & root) {
+		return const_cast<class_tag*>(const_cast<const class_tag*>(this)->find_tag(fullpath, root));
+	}
 
 	void add_tags (const tag_map & list){
 		tags_.insert(list.begin(),list.end());

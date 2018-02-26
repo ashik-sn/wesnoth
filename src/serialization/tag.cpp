@@ -18,10 +18,13 @@
  */
 
 #include "serialization/tag.hpp"
+#include "serialization/string_utils.hpp"
 
 #include "config.hpp"
 
 namespace schema_validation{
+
+class_tag any_tag("", 0, -1, "", true);
 
 /*WIKI
  * @begin{parent}{name="wml_schema/tag/"}
@@ -36,11 +39,97 @@ namespace schema_validation{
  * @end{parent}{name="wml_schema/tag/"}
  */
 
+class_type::class_type(const config& cfg)
+	: name_(cfg["name"].str())
+{
+	if(cfg.has_child("union")) {
+		join = UNION;
+		for(const config& elem : cfg.child("union").child_range("type")) {
+			if(elem.has_attribute("value")) {
+				patterns_.emplace_back("^(?:" + elem["value"].str() + ")$");
+			} else if(elem.has_attribute("link")) {
+				links_.emplace_back(elem["link"].str());
+			}
+		}
+	} else if(cfg.has_child("intersection")) {
+		join = INTERSECTION;
+		for(const config& elem : cfg.child("intersection").child_range("type")) {
+			if(elem.has_attribute("value")) {
+				patterns_.emplace_back("^(?:" + elem["value"].str() + ")$");
+			} else if(elem.has_attribute("link")) {
+				links_.emplace_back(elem["link"].str());
+			}
+		}
+	} else if(cfg.has_child("list")) {
+		const config& list_cfg = cfg.child("list");
+		join = UNION;
+		is_list_ = true;
+		list_min_ = list_cfg["min"].to_int();
+		list_max_ = list_cfg["max"].str() == "infinite" ? -1 : list_cfg["max"].to_int(-1);
+		if(list_max_ < 0) list_max_ = INT_MAX;
+		split_ = list_cfg["split"].str(",");
+		for(const config& elem : cfg.child("list").child_range("element")) {
+			if(elem.has_attribute("value")) {
+				patterns_.emplace_back("^(?:" + elem["value"].str() + ")$");
+			} else if(elem.has_attribute("link")) {
+				links_.emplace_back(elem["link"].str());
+			}
+		}
+	} else if(cfg.has_attribute("value")) {
+		patterns_.emplace_back(cfg["value"].str());
+	}
+}
+
+bool class_type::matches(const std::string& value, const std::map<std::string, class_type>& type_map) const {
+	if(is_list_ && !in_list_match_) {
+		if(this->name_ == "range") {
+			in_list_match_ = true;
+		}
+		in_list_match_ = true;
+		boost::sregex_token_iterator it(value.begin(), value.end(), split_, -1);
+		int n = !value.empty();
+		bool result = std::any_of(it, boost::sregex_token_iterator(), [this, &type_map, &n](const boost::ssub_match& match){
+			if(!match.matched) return false;
+			n++;
+			return this->matches(std::string(match.first, match.second), type_map);
+		});
+		in_list_match_ = false;
+		return result && n >= list_min_ && n <= list_max_;
+	}
+	for(const auto& pat : patterns_) {
+		boost::smatch sub;
+		bool res = boost::regex_match(value, sub, pat);
+		switch(join) {
+			case UNION: if(res) return true; else break;
+			case INTERSECTION: if(!res) return false; else break;
+		}
+	}
+	for(const auto& link : links_) {
+		auto it = type_map.find(link);
+		if(it == type_map.end()) {
+			// TODO: Error message about the invalid type?
+			continue;
+		}
+		bool res = it->second.matches(value, type_map);
+		switch(join) {
+			case UNION: if(res) return true; else break;
+			case INTERSECTION: if(!res) return false; else break;
+		}
+	}
+	switch(join) {
+		case UNION: return false;
+		case INTERSECTION: return true;
+	}
+	assert(false && "class_type::matches reached end of function because join value was corrupted");
+	return false;
+}
+
  class_key::class_key(const config & cfg)
  	: name_(cfg["name"].str())
 	, type_(cfg["type"].str())
 	, default_()
 	, mandatory_(false)
+	, fuzzy_(name_.find_first_of("*?") != std::string::npos)
  {
 	 if (cfg.has_attribute("mandatory")){
 		 mandatory_ = cfg["mandatory"].to_bool();
@@ -68,11 +157,13 @@ void class_key::print(std::ostream& os,int level) const {
 class_tag::class_tag(const config & cfg)
 	: name_(cfg["name"].str())
 	, min_(cfg["min"].to_int())
-	, max_(cfg["max"].to_int())
+	, max_(cfg["max"].str() == "infinite" ? -1 : cfg["max"].to_int(1))
 	, super_("")
 	, tags_()
 	, keys_()
 	, links_()
+	, any_tag_(cfg["any_tag"].to_bool())
+	, fuzzy_(name_.find_first_of("*?") != std::string::npos)
 {
 		if (max_ < 0){
 			max_ = INT_MAX;
@@ -110,6 +201,13 @@ const class_key * class_tag::find_key(const std::string &name) const{
 	if ( it_keys!= keys_.end() ){
 		return &(it_keys->second);
 	}
+	key_map::const_iterator it_fuzzy = std::find_if(keys_.begin(), keys_.end(), [&name](const key_map::value_type& key){
+		if(!key.second.is_fuzzy()) return false;
+		return utils::wildcard_string_match(name, key.second.get_name());
+	});
+	if(it_fuzzy != keys_.end()) {
+		return &(it_fuzzy->second);
+	}
 	return nullptr;
 }
 
@@ -144,6 +242,20 @@ const class_tag * class_tag::find_tag(const std::string &fullpath,
 	 link_map::const_iterator it_links = links_.find(name);
 	 if (it_links != links_.end()){
 		 return root.find_tag(it_links->second + "/" +next_path,root);
+	 }
+	 tag_map::const_iterator it_fuzzy = std::find_if(tags_.begin(), tags_.end(), [&name](const tag_map::value_type& tag){
+		 if(!tag.second.fuzzy_) return false;
+		 return utils::wildcard_string_match(name, tag.second.name_);
+	 });
+	 if(it_fuzzy != tags_.end()) {
+		 if(next_path.empty()) {
+			 return &(it_fuzzy->second);
+		 } else {
+			 return it_tags->second.find_tag(next_path, root);
+		 }
+	 }
+	 if(any_tag_) {
+		 return &any_tag;
 	 }
 	 return nullptr;
 
@@ -224,34 +336,6 @@ void class_tag::printl(std::ostream &os,int level, int step){
 	os<< s << "[/tag]\n";
 }
 
- class_tag * class_tag::find_tag(const std::string &fullpath,
-									   class_tag &root) {
-	 if (fullpath.empty()) return nullptr;
-	 std::string::size_type pos = fullpath.find('/');
-	 std::string name;
-	 std::string next_path;
-	 if (pos != std::string::npos) {
-		 name = fullpath.substr(0,pos);
-		 next_path = fullpath.substr(pos+1,fullpath.length());
-	 }else{
-		 name = fullpath;
-	 }
-
-	 tag_map::iterator it_tags = tags_.find(name);
-	 if (it_tags != tags_.end()){
-		 if (next_path.empty()){
-			 return &(it_tags->second);
-				 }else{
-			 return it_tags->second.find_tag(next_path,root);
-		 }
-	 }
-	 link_map::iterator it_links = links_.find(name);
-	 if (it_links != links_.end()){
-		 return root.find_tag(it_links->second +"/" +next_path,root);
-	 }
-	 return nullptr;
-
- }
 // class_tag & class_tag::operator= (const class_tag& t){
 //	 if (&t != this){
 //		 name_ = t.name_;
@@ -305,8 +389,16 @@ void class_tag::append_super(const class_tag &tag,const std::string & path){
 	add_links(tag.links_);
 	for (tag_map::const_iterator i = tag.tags_.begin();i!=tag.tags_.end();++i){
 		links_.erase(i->first);
-		add_link(path + "/" + i->first);
-
+		if(i->second.is_fuzzy()) {
+			// Fuzzy tags won't work as links, so make a copy
+			// (Links just don't hold enough info for this to work.)
+			add_tag(i->second);
+		} else {
+			add_link(path + "/" + i->first);
+		}
+	}
+	if(tag.any_tag_) {
+		any_tag_ = true;
 	}
 }
 
@@ -322,6 +414,7 @@ void class_tag::expand(class_tag &root){
 				std::cerr << "the same" << super_tag->name_ <<"\n";
 			}
 		}
+		// TODO: Warn if the super doesn't exist
 	}
 }
 }//namespace schema_generator
